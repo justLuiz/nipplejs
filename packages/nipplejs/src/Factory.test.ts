@@ -1,8 +1,9 @@
-import type { Uid, Identifier } from 'nipplejs/types';
+import type { Uid, Identifier, DomEvent } from 'nipplejs/types';
 
 import { Collection } from './Collection';
 import { Factory } from './Factory';
 import { Joystick } from './Joystick';
+import { MODES } from './constants';
 import * as utils from './utils';
 
 // Helper to create a mock zone element
@@ -427,6 +428,87 @@ describe('Factory', () => {
             factory.destroy();
 
             expect(offSpy).toHaveBeenCalled();
+        });
+    });
+
+    describe('cleanInactiveTouches', () => {
+        it('regression: pointer events do not force-end other simultaneously active joysticks', () => {
+            // Bug: cleanInactiveTouches used [currentPointerId] as the active set for pointer
+            // events, so any joystick with a different identifier was incorrectly force-ended.
+            // Fix: guard returns early for pointer events — each pointer's own pointerup handles cleanup.
+            const factory = new Factory();
+
+            const processOnEnd1 = jest.fn();
+            const processOnEnd2 = jest.fn();
+
+            const mockJoystick1 = {
+                collection: { options: { mode: MODES.dynamic }, processOnEnd: processOnEnd1 },
+            };
+            const mockJoystick2 = {
+                collection: { options: { mode: MODES.dynamic }, processOnEnd: processOnEnd2 },
+            };
+
+            // Two pointers active simultaneously with identifiers 1 and 2
+            (factory as any).joysticksByIdentifier.set(1 as Identifier, mockJoystick1);
+            (factory as any).joysticksByIdentifier.set(2 as Identifier, mockJoystick2);
+
+            // Pointer 1 fires pointerup — should NOT end joystick 2
+            const pointerEvt = new PointerEvent('pointerup', { pointerId: 1 });
+            const domEvent: DomEvent = {
+                identifier: 1 as Identifier,
+                isTouch: false,
+                position: { x: 100, y: 100 },
+                pressure: 0,
+                type: 'pointerup',
+                initial: pointerEvt,
+                raw: pointerEvt,
+            };
+
+            (factory as any).cleanInactiveTouches(domEvent);
+
+            expect(processOnEnd1).not.toHaveBeenCalled();
+            expect(processOnEnd2).not.toHaveBeenCalled();
+
+            factory.destroy();
+        });
+
+        it('cleans up dynamic joysticks absent from the active TouchEvent touches list', () => {
+            // Complementary: for TouchEvent, inactive joysticks (identifiers not in
+            // event.touches) should still be force-ended.
+            const factory = new Factory();
+
+            const processOnEnd = jest.fn();
+            const mockJoystick = {
+                collection: { options: { mode: MODES.dynamic }, processOnEnd },
+            };
+
+            // Joystick 2 is active but absent from the upcoming touch event's touches list
+            (factory as any).joysticksByIdentifier.set(2 as Identifier, mockJoystick);
+
+            const mockTouchEvent = {
+                type: 'touchend',
+                // Only touch 1 is still active — touch 2 was lost
+                touches: [{ identifier: 1, pageX: 50, pageY: 50, clientX: 50, clientY: 50 }],
+                changedTouches: [],
+                preventDefault: jest.fn(),
+            } as unknown as TouchEvent;
+
+            const domEvent: DomEvent = {
+                identifier: 1 as Identifier,
+                isTouch: true,
+                position: { x: 50, y: 50 },
+                pressure: 0,
+                type: 'touchend',
+                initial: mockTouchEvent,
+                raw: { identifier: 1, pageX: 50, pageY: 50 } as unknown as Touch,
+            };
+
+            (factory as any).cleanInactiveTouches(domEvent);
+
+            // Joystick 2 is not in touches — it must be force-ended
+            expect(processOnEnd).toHaveBeenCalledTimes(1);
+
+            factory.destroy();
         });
     });
 
